@@ -70,9 +70,15 @@ fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Resul
 
     // Create I2C messages for combined write-then-read transaction.
     // The address is specified per message, crucial for shared bus scenarios.
+    //let msgs = &mut [
+    //    LinuxI2CMessage::write { address: device_addr, data: &mut write_buf },
+    //    LinuxI2CMessage::read { address: device_addr, data: &mut read_buf },
+    //];
+    // Cast device_addr to u8 for the I2C message.
+    let device_addr = device_addr as u8;
     let msgs = &mut [
-        LinuxI2CMessage::Write { address: device_addr, data: &mut write_buf },
-        LinuxI2CMessage::Read { address: device_addr, data: &mut read_buf },
+        LinuxI2CMessage::write(&[0x40]),
+        LinuxI2CMessage::read(&mut read_buf),
     ];
 
     i2c.transfer(msgs)
@@ -102,7 +108,7 @@ async fn main() -> Result<()> {
 
     info!("Initializing I2C bus: {}", args.i2c_bus);
     // Open the I2C bus device (e.g., /dev/i2c-1).
-    let mut i2c = LinuxI2CDevice::new(&args.i2c_bus, 0x70);
+    let mut i2c = LinuxI2CDevice::new(&args.i2c_bus, 0x70)
         .context(format!("Failed to open I2C bus at {}", args.i2c_bus))?;
 
     // --- TCA9548A Multiplexer Handling ---
