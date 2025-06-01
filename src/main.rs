@@ -17,7 +17,6 @@ use log::{info, error, warn};
 const INA260_ADDRESS: u16 = 0x40; // Default INA260 I2C address
 
 // INA260 Register Addresses
-const INA260_REG_CONFIG: u8      = 0x00; // Configuration Register
 const INA260_REG_CURRENT: u8    = 0x01; // Current Register
 const INA260_REG_BUS_VOLTAGE: u8 = 0x02; // Bus Voltage Register
 const INA260_REG_POWER: u8       = 0x03; // Power Register
@@ -64,25 +63,17 @@ lazy_static::lazy_static! {
 
 /// Reads a 16-bit value from the specified INA260 register.
 /// The INA260 returns data in Big-Endian format.
-fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Result<u16> {
-    let mut write_buf = [reg];
+fn read_ina260_reg(i2c: &mut LinuxI2CDevice, reg: u8) -> Result<u16> {
     let mut read_buf = [0; 2]; // 16-bit (2 bytes)
 
     // Create I2C messages for combined write-then-read transaction.
-    // The address is specified per message, crucial for shared bus scenarios.
-    //let msgs = &mut [
-    //    LinuxI2CMessage::write { address: device_addr, data: &mut write_buf },
-    //    LinuxI2CMessage::read { address: device_addr, data: &mut read_buf },
-    //];
-    // Cast device_addr to u8 for the I2C message.
-    let device_addr = device_addr as u8;
     let msgs = &mut [
-        LinuxI2CMessage::write(&[0x40]),
+        LinuxI2CMessage::write(&[reg]),
         LinuxI2CMessage::read(&mut read_buf),
     ];
 
     i2c.transfer(msgs)
-        .context(format!("Failed to perform I2C transaction on register 0x{:02x} for device 0x{:02x}", reg, device_addr))?;
+        .context(format!("Failed to perform I2C transaction on register 0x{:02x}", reg))?;
 
     Ok(BigEndian::read_u16(&read_buf))
 }
@@ -150,9 +141,9 @@ async fn main() -> Result<()> {
 
     // Read Manufacturer ID and Device ID to verify communication.
     // Expected Manufacturer ID: 0x5449 (TI), Device ID: 0x2260 (INA260).
-    let manuf_id = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_MANUF_ID)
+    let manuf_id = read_ina260_reg(&mut i2c, INA260_REG_MANUF_ID)
         .context("Failed to read INA260 Manufacturer ID")?;
-    let device_id = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_DEVICE_ID)
+    let device_id = read_ina260_reg(&mut i2c, INA260_REG_DEVICE_ID)
         .context("Failed to read INA260 Device ID")?;
     info!("INA260: Manufacturer ID: 0x{:04X}, Device ID: 0x{:04X}", manuf_id, device_id);
     if manuf_id != 0x5449 || device_id != 0x2260 {
@@ -182,12 +173,8 @@ async fn main() -> Result<()> {
     // --- Main Sensing Loop ---
     info!("Reading INA260 values (Voltage, Current, Power)...");
     loop {
-        // Explicitly set the slave address for INA260 again before reading,
-        // in case other I2C operations (if any were added) changed it.
-        i2c.set_slave_address(INA260_ADDRESS)?;
-
         // Read Current (Register 0x01).
-        let raw_current_res = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_CURRENT);
+        let raw_current_res = read_ina260_reg(&mut i2c, INA260_REG_CURRENT);
         let current = match raw_current_res {
             Ok(raw_current) => {
                 // The Current Register (0x01) is a 16-bit two's complement signed integer.
@@ -202,7 +189,7 @@ async fn main() -> Result<()> {
         };
 
         // Read Voltage (Register 0x02).
-        let raw_voltage_res = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_BUS_VOLTAGE);
+        let raw_voltage_res = read_ina260_reg(&mut i2c, INA260_REG_BUS_VOLTAGE);
         let voltage = match raw_voltage_res {
             Ok(raw_voltage) => {
                 // Convert raw voltage (mV) to Volts (V).
@@ -216,7 +203,7 @@ async fn main() -> Result<()> {
         };
 
         // Read Power (Register 0x03).
-        let raw_power_res = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_POWER);
+        let raw_power_res = read_ina260_reg(&mut i2c, INA260_REG_POWER);
         let power = match raw_power_res {
             Ok(raw_power) => {
                 // Convert raw power (mW) to Watts (W).
