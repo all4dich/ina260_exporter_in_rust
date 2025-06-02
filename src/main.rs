@@ -70,14 +70,11 @@ fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Resul
 
     // Create I2C messages for combined write-then-read transaction.
     // The address is specified per message, crucial for shared bus scenarios.
-    //let msgs = &mut [
-    //    LinuxI2CMessage::write { address: device_addr, data: &mut write_buf },
-    //    LinuxI2CMessage::read { address: device_addr, data: &mut read_buf },
-    //];
     // Cast device_addr to u8 for the I2C message.
     let device_addr = device_addr as u8;
+    let binding = [reg];
     let msgs = &mut [
-        LinuxI2CMessage::write(&[0x40]),
+        LinuxI2CMessage::write(&binding),
         LinuxI2CMessage::read(&mut read_buf),
     ];
 
@@ -90,8 +87,8 @@ fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Resul
 #[tokio::main] // Enables asynchronous features for the HTTP server
 async fn main() -> Result<()> {
     // Initialize standard logging.
-    env_logger::init();
-
+    //env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // Register Prometheus gauges with the default registry.
     prometheus::default_registry().register(Box::new(INA260_CURRENT.clone()))?;
     prometheus::default_registry().register(Box::new(INA260_VOLTAGE.clone()))?;

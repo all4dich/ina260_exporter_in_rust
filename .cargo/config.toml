@@ -6,5 +6,9 @@ ar = "aarch64-unknown-linux-gnu-ar" # Optional, but good practice
 linker = "arm-unknown-linux-gnueabi-gcc"
 ar = "arm-unknown-linux-gnueabi-ar"
 
+[target.armv7-unknown-linux-gnueabihf]
+linker = "armv7-unknown-linux-gnueabihf-gcc"
+ar = "armv7-unknown-linux-gnueabihf-ar"
+
 [build]
-target = "aarch64-unknown-linux-gnu" # Set the default target
+target = "armv7-unknown-linux-gnueabihf"
