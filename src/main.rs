@@ -1,14 +1,14 @@
 extern crate i2cdev;
 
-use i2cdev::core::*;
-#[cfg(any(target_os = "linux"))]
-use i2cdev::linux::*;
+use i2cdev::core::{I2CDevice, I2CMessage}; // Updated imports
+use i2cdev::linux::LinuxI2CDevice; // For concrete instantiation
 use byteorder::{BigEndian, ByteOrder};
 use std::thread;
 use std::time::Duration;
 use clap::Parser;
 use prometheus::{Encoder, TextEncoder, gather, GaugeVec};
 use std::net::SocketAddr;
+use std::ops::DerefMut;
 use warp::Filter;
 use anyhow::{Result, Context};
 use log::{info, error, warn};
@@ -62,33 +62,29 @@ lazy_static::lazy_static! {
         ).unwrap();
 }
 
-/// Reads a 16-bit value from the specified INA260 register.
+/// Reads a 16-bit value from the specified INA260 register using I2CDevice trait.
 /// The INA260 returns data in Big-Endian format.
-fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Result<u16> {
-    let mut write_buf = [reg];
-    let mut read_buf = [0; 2]; // 16-bit (2 bytes)
+fn read_ina260_reg(i2c: &mut dyn I2CDevice<Error=LinuxI2CError>, device_addr: u16, reg: u8) -> Result<u16> {
+        let mut read_buf = [0; 2]; // 16-bit (2 bytes)
+        let write_payload = [reg]; // The register address to read from
 
-    // Create I2C messages for combined write-then-read transaction.
-    // The address is specified per message, crucial for shared bus scenarios.
-    // Cast device_addr to u8 for the I2C message.
-    let device_addr = device_addr as u8;
-    let binding = [reg];
-    let msgs = &mut [
-        LinuxI2CMessage::write(&binding),
-        LinuxI2CMessage::read(&mut read_buf),
-    ];
+        // Create I2C messages for combined write-then-read transaction.
+        let mut msgs = [
+            I2CMessage::new_write(device_addr, &[reg]),
+            I2CMessage::new_read(device_addr, &mut read_buf),
+        ];
 
-    i2c.transfer(msgs)
-        .context(format!("Failed to perform I2C transaction on register 0x{:02x} for device 0x{:02x}", reg, device_addr))?;
-
-    Ok(BigEndian::read_u16(&read_buf))
-}
+        i2c.read(&mut msgs)
+            .map_err(|e| anyhow::anyhow!("I2C transaction failed: {:?}", e)) // Convert LinuxI2CError to anyhow::Error
+            .context(format!("Failed to perform I2C transaction on register 0x{:02X} for device 0x{:02X}", reg, device_addr))?;
+        Ok(BigEndian::read_u16(&read_buf))
+    }
 
 #[tokio::main] // Enables asynchronous features for the HTTP server
 async fn main() -> Result<()> {
     // Initialize standard logging.
-    //env_logger::init();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     // Register Prometheus gauges with the default registry.
     prometheus::default_registry().register(Box::new(INA260_CURRENT.clone()))?;
     prometheus::default_registry().register(Box::new(INA260_VOLTAGE.clone()))?;
@@ -103,11 +99,6 @@ async fn main() -> Result<()> {
         .into_string()
         .map_err(|e| anyhow::anyhow!("Hostname is not valid UTF-8: {:?}", e))?;
 
-    info!("Initializing I2C bus: {}", args.i2c_bus);
-    // Open the I2C bus device (e.g., /dev/i2c-1).
-    let mut i2c = LinuxI2CDevice::new(&args.i2c_bus, 0x70)
-        .context(format!("Failed to open I2C bus at {}", args.i2c_bus))?;
-
     // --- TCA9548A Multiplexer Handling ---
     // Parse TCA address (supports "0x" prefix).
     let tca_address_str = if args.tca_address.starts_with("0x") {
@@ -117,6 +108,13 @@ async fn main() -> Result<()> {
     };
     let tca_address = u16::from_str_radix(tca_address_str, 16)
         .context(format!("Invalid TCA address format: {}", args.tca_address))?;
+
+    info!("Initializing I2C bus: {}", args.i2c_bus);
+    // Open the I2C bus device (e.g., /dev/i2c-1).
+    // LinuxI2CDevice::new requires an initial slave address. We'll use the TCA's address.
+    let mut i2c = LinuxI2CDevice::new(&args.i2c_bus, tca_address)
+        .map_err(|e| anyhow::anyhow!(e)) // Convert LinuxI2CError to anyhow::Error
+        .context(format!("Failed to open I2C bus {} with initial address 0x{:02X}", args.i2c_bus, tca_address))?;
 
     info!("Using TCA9548A at address: 0x{:02X}", tca_address);
 
@@ -128,12 +126,16 @@ async fn main() -> Result<()> {
     let ina260_channel = channel_int as u8;
     let channel_selection_byte = 1 << ina260_channel;
 
-    // Set the I2C slave address to the TCA9548A and write the channel selection byte.
+    // Set the I2C slave address to the TCA9548A (if not already set by new())
+    // and write the channel selection byte.
     // This routes subsequent communications on this bus to the selected channel.
-    info!("TCA9548A: Setting slave address for TCA to 0x{:02X}", tca_address);
-    i2c.set_slave_address(tca_address)?;
+    // Note: LinuxI2CDevice::new already set the address, but set_slave_address is idempotent
+    // and good practice if the initial address might differ or for clarity.
+    i2c.set_slave_address(tca_address)
+        .map_err(|e| anyhow::anyhow!(e))?;
     info!("TCA9548A: Selected channel {}", ina260_channel);
     i2c.write(&[channel_selection_byte])
+        .map_err(|e| anyhow::anyhow!(e))
         .context(format!("Failed to select channel {} on TCA9548A", ina260_channel))?;
 
     // Define the device label for Prometheus metrics.
@@ -141,12 +143,11 @@ async fn main() -> Result<()> {
     info!("Device label: {}", device_label);
 
     // --- INA260 Communication Verification ---
-    // Set the I2C slave address to the INA260.
-    info!("Setting slave address for INA260 to 0x{:02X}", INA260_ADDRESS);
-    i2c.set_slave_address(INA260_ADDRESS)?;
+    // The read_ina260_reg function now handles addressing within its I2CMessages.
+    // Setting slave address here is good practice for context if other INA260 direct i2c calls were made.
+    // For read_ina260_reg, the device_addr argument it takes is primary.
+    info!("Verifying communication with INA260 at 0x{:02X}", INA260_ADDRESS);
 
-    // Read Manufacturer ID and Device ID to verify communication.
-    // Expected Manufacturer ID: 0x5449 (TI), Device ID: 0x2260 (INA260).
     let manuf_id = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_MANUF_ID)
         .context("Failed to read INA260 Manufacturer ID")?;
     let device_id = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_DEVICE_ID)
@@ -160,18 +161,16 @@ async fn main() -> Result<()> {
     }
 
     // --- Start Prometheus HTTP Server ---
-    // Define the `/metrics` endpoint to serve Prometheus metrics.
     let metrics_route = warp::path!("metrics").map(|| {
         let encoder = TextEncoder::new();
-        let metric_families = gather(); // Collect all registered metrics.
+        let metric_families = gather();
         let mut buffer = vec![];
-        encoder.encode(&metric_families, &mut buffer).unwrap(); // Encode metrics to text format.
+        encoder.encode(&metric_families, &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
     });
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 9090)); // Listen on all interfaces, port 9090.
+    let addr = SocketAddr::from(([0, 0, 0, 0], 9090));
     info!("Starting Prometheus metrics server on {}", addr);
-    // Spawn the HTTP server in a separate Tokio task to run concurrently.
     tokio::spawn(async move {
         warp::serve(metrics_route).run(addr).await;
     });
@@ -179,30 +178,26 @@ async fn main() -> Result<()> {
     // --- Main Sensing Loop ---
     info!("Reading INA260 values (Voltage, Current, Power)...");
     loop {
-        // Explicitly set the slave address for INA260 again before reading,
-        // in case other I2C operations (if any were added) changed it.
-        i2c.set_slave_address(INA260_ADDRESS)?;
+        // The read_ina260_reg function uses the device_addr passed to it for I2CMessage addressing.
+        // Explicitly setting slave address on the `i2c` object here is not strictly necessary
+        // for these calls but can be good practice if other operations rely on this context.
+        // i2c.set_slave_address(INA260_ADDRESS).map_err(|e| anyhow::anyhow!(e))?;
 
-        // Read Current (Register 0x01).
         let raw_current_res = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_CURRENT);
         let current = match raw_current_res {
             Ok(raw_current) => {
-                // The Current Register (0x01) is a 16-bit two's complement signed integer.
-                // Convert raw current (mA) to Amperes (A).
                 (raw_current as i16) as f64 * CURRENT_LSB / 1000.0
             }
             Err(e) => {
                 error!("Error reading current from INA260: {:?}", e);
-                thread::sleep(Duration::from_secs(1)); // Wait before retrying.
+                thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
 
-        // Read Voltage (Register 0x02).
         let raw_voltage_res = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_BUS_VOLTAGE);
         let voltage = match raw_voltage_res {
             Ok(raw_voltage) => {
-                // Convert raw voltage (mV) to Volts (V).
                 raw_voltage as f64 * VOLTAGE_LSB / 1000.0
             }
             Err(e) => {
@@ -212,11 +207,9 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Read Power (Register 0x03).
         let raw_power_res = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_POWER);
         let power = match raw_power_res {
             Ok(raw_power) => {
-                // Convert raw power (mW) to Watts (W).
                 raw_power as f64 * POWER_LSB / 1000.0
             }
             Err(e) => {
@@ -228,12 +221,10 @@ async fn main() -> Result<()> {
 
         info!("Voltage: {:.3} V, Current: {:.3} A, Power: {:.3} W", voltage, current, power);
 
-        // Update Prometheus gauges with the collected data and labels.
         INA260_CURRENT.with_label_values(&[&hostname, &device_label]).set(current);
         INA260_VOLTAGE.with_label_values(&[&hostname, &device_label]).set(voltage);
         INA260_POWER.with_label_values(&[&hostname, &device_label]).set(power);
 
-        thread::sleep(Duration::from_secs(1)); // Wait for 1 second before the next reading.
+        thread::sleep(Duration::from_secs(1));
     }
 }
-
