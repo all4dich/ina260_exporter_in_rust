@@ -101,11 +101,11 @@ fn get_device(i2c_bus: &str, tca_address_str: &str, ina260_channel: u8) -> Resul
         };
         let tca_address = u16::from_str_radix(tca_address_str, 16)
             .context(format!("Invalid TCA address format: {}", tca_address_str))?;
-       
+
         if ina260_channel > 7 {
             anyhow::bail!("Channel number must be between 0 and 7, got {}", ina260_channel);
         }
-       
+
         let mut i2c = LinuxI2CDevice::new(&i2c_bus, tca_address)?;
         let channel_selection_byte = 1 << ina260_channel;
         info!("Initializing I2C bus: {} for TCA9548A at address 0x{:02X} and INA260 at address 0x{:02X}", i2c_bus, tca_address, INA260_ADDRESS);
@@ -135,40 +135,11 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Hostname is not valid UTF-8: {:?}", e))?;
 
     info!("Initializing I2C bus: {}", args.i2c_bus);
-    // Open the I2C bus device (e.g., /dev/i2c-1).
-    let mut i2c = LinuxI2CDevice::new(&args.i2c_bus, 0x70)
-        .context(format!("Failed to open I2C bus at {}", args.i2c_bus))?;
-
-    // --- TCA9548A Multiplexer Handling ---
-    // Parse TCA address (supports "0x" prefix).
-    let tca_address_str = if args.tca_address.starts_with("0x") {
-        args.tca_address.trim_start_matches("0x")
-    } else {
-        &args.tca_address
-    };
-    let tca_address = u16::from_str_radix(tca_address_str, 16)
-        .context(format!("Invalid TCA address format: {}", args.tca_address))?;
-
-    info!("Using TCA9548A at address: 0x{:02X}", tca_address);
-
-    // Validate and prepare the channel selection byte for TCA9548A.
-    let channel_int = args.channel;
-    if channel_int > 7 {
-        anyhow::bail!("Channel number must be between 0 and 7, got {}", channel_int);
-    }
-    let ina260_channel = channel_int as u8;
-    let channel_selection_byte = 1 << ina260_channel;
-
-    // Set the I2C slave address to the TCA9548A and write the channel selection byte.
-    // This routes subsequent communications on this bus to the selected channel.
-    info!("TCA9548A: Setting slave address for TCA to 0x{:02X}", tca_address);
-    i2c.set_slave_address(tca_address)?;
-    info!("TCA9548A: Selected channel {}", ina260_channel);
-    i2c.write(&[channel_selection_byte])
-        .context(format!("Failed to select channel {} on TCA9548A", ina260_channel))?;
-
+    let tca_address_str = &args.tca_address;
+    let ina260_channel = args.channel;
+    let mut i2c = get_device(&args.i2c_bus, tca_address_str, ina260_channel)?;
     // Define the device label for Prometheus metrics.
-    let device_label = format!("tca9548a_0x{:02X}_ch{}_ina260", tca_address, ina260_channel);
+    let device_label = format!("tca9548a_0x{}_ch{}_ina260", tca_address_str, ina260_channel);
     info!("Device label: {}", device_label);
 
     // --- INA260 Communication Verification ---
