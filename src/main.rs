@@ -44,7 +44,7 @@ struct Args {
     )]
     i2c_bus: String,
 
-    #[arg(short, long, default_value_t = false, help = "test")]
+    #[arg(short, long, default_value_t = false, help = "Connect directly to INA260 without I2C multiplexer")]
     without_multiplexer: bool,
 }
 
@@ -113,7 +113,7 @@ fn get_device(i2c_bus: &str, tca_address_str: &str, ina260_channel: u8) -> Resul
         let channel_selection_byte = 1 << ina260_channel;
         info!("Initializing I2C bus: {} for TCA9548A at address 0x{:02X} and INA260 at address 0x{:02X}", i2c_bus, tca_address, INA260_ADDRESS);
         i2c.write(&[channel_selection_byte])
-            .context("error")?;
+            .context(format!("Failed to select channel {} on TCA9548A at address 0x{:02X}", ina260_channel, tca_address))?;
         i2c.set_slave_address(INA260_ADDRESS)?;
         Ok(i2c)
     }
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let mut i2c = get_device(&args.i2c_bus, tca_address_str, ina260_channel)?;
     // Define the device label for Prometheus metrics.
     let device_label = match tca_address_str {
-        "" => format!("ina260_{}", INA260_ADDRESS),
+        "" => format!("ina260_{:02X}", INA260_ADDRESS),
         _ => format!("tca9548a_{}_ch{}_ina260", tca_address_str, ina260_channel)
     };
     info!("Device label: {}", device_label);
