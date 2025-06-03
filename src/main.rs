@@ -70,7 +70,7 @@ lazy_static::lazy_static! {
 /// Reads a 16-bit value from the specified INA260 register.
 /// The INA260 returns data in Big-Endian format.
 fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Result<u16> {
-    let mut write_buf = [reg];
+    //let mut write_buf = [reg];
     let mut read_buf = [0; 2]; // 16-bit (2 bytes)
 
     // Create I2C messages for combined write-then-read transaction.
@@ -90,6 +90,9 @@ fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Resul
 }
 fn get_device(i2c_bus: &str, tca_address_str: &str, ina260_channel: u8) -> Result<LinuxI2CDevice > {
     if tca_address_str == "" {
+        // If the TCA address is empty, assume direct INA260 connection.
+        info!("TCA address not specified. Assuming direct connection to INA260.");
+        // Open the I2C device file for the specified bus and INA260 address.
         info!("Initializing I2C bus: {} for INA260 at address 0x{:02X}", i2c_bus, INA260_ADDRESS);
         Ok(LinuxI2CDevice::new(&i2c_bus, INA260_ADDRESS)
             .context(format!("Failed to open I2C bus at {} for INA260", i2c_bus))?)
@@ -135,11 +138,23 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Hostname is not valid UTF-8: {:?}", e))?;
 
     info!("Initializing I2C bus: {}", args.i2c_bus);
-    let tca_address_str = &args.tca_address;
+    let tca_address_str = match args.without_multiplexer {
+        true => {
+            info!("Assuming direct connection to INA260 by the argument");
+            ""
+        },
+        false => {
+            info!("Assuming connection to INA260 using I2C multiplexer");
+            &args.tca_address
+        },
+    };
     let ina260_channel = args.channel;
     let mut i2c = get_device(&args.i2c_bus, tca_address_str, ina260_channel)?;
     // Define the device label for Prometheus metrics.
-    let device_label = format!("tca9548a_0x{}_ch{}_ina260", tca_address_str, ina260_channel);
+    let device_label = match tca_address_str {
+        "" => format!("ina260_{}", INA260_ADDRESS),
+        _ => format!("tca9548a_{}_ch{}_ina260", tca_address_str, ina260_channel)
+    };
     info!("Device label: {}", device_label);
 
     // --- INA260 Communication Verification ---
@@ -149,10 +164,13 @@ async fn main() -> Result<()> {
 
     // Read Manufacturer ID and Device ID to verify communication.
     // Expected Manufacturer ID: 0x5449 (TI), Device ID: 0x2260 (INA260).
+    let conf_id = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_CONFIG)
+        .context("Failed to read INA260 register")?;
     let manuf_id = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_MANUF_ID)
         .context("Failed to read INA260 Manufacturer ID")?;
     let device_id = read_ina260_reg(&mut i2c, INA260_ADDRESS, INA260_REG_DEVICE_ID)
         .context("Failed to read INA260 Device ID")?;
+    info!("INA260: Configuration ID: 0x{:04X}", conf_id);
     info!("INA260: Manufacturer ID: 0x{:04X}, Device ID: 0x{:04X}", manuf_id, device_id);
     if manuf_id != 0x5449 || device_id != 0x2260 {
         warn!(
