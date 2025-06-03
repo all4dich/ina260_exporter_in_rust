@@ -17,30 +17,35 @@ use log::{info, error, warn};
 const INA260_ADDRESS: u16 = 0x40; // Default INA260 I2C address
 
 // INA260 Register Addresses
-const INA260_REG_CONFIG: u8      = 0x00; // Configuration Register
-const INA260_REG_CURRENT: u8    = 0x01; // Current Register
+const INA260_REG_CONFIG: u8 = 0x00; // Configuration Register
+const INA260_REG_CURRENT: u8 = 0x01; // Current Register
 const INA260_REG_BUS_VOLTAGE: u8 = 0x02; // Bus Voltage Register
-const INA260_REG_POWER: u8       = 0x03; // Power Register
-const INA260_REG_MANUF_ID: u8    = 0xFE; // Manufacturer ID Register
-const INA260_REG_DEVICE_ID: u8   = 0xFF; // Device ID Register
+const INA260_REG_POWER: u8 = 0x03; // Power Register
+const INA260_REG_MANUF_ID: u8 = 0xFE; // Manufacturer ID Register
+const INA260_REG_DEVICE_ID: u8 = 0xFF; // Device ID Register
 
 // INA260 Scaling Factors
 const VOLTAGE_LSB: f64 = 1.25; // mV/LSB for Bus Voltage Register
 const CURRENT_LSB: f64 = 1.25; // mA/LSB for Current Register
-const POWER_LSB: f64   = 10.0; // mW/LSB for Power Register
+const POWER_LSB: f64 = 10.0; // mW/LSB for Power Register
 
 // Defines command-line arguments for the application.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, long, default_value_t = String::from("0x70"), help = "TCA9548A I2C address (e.g., 0x70)")]
+    #[arg(short, long, default_value_t = String::from("0x70"), help = "TCA9548A I2C address (e.g., 0x70)"
+    )]
     tca_address: String,
 
     #[arg(short, long, default_value_t = 0, help = "TCA9548A channel number for INA260 (0-7)")]
     channel: u8,
 
-    #[arg(short, long, default_value_t = String::from("/dev/i2c-1"), help = "I2C bus device path (e.g., /dev/i2c-1)")]
+    #[arg(short, long, default_value_t = String::from("/dev/i2c-1"), help = "I2C bus device path (e.g., /dev/i2c-1)"
+    )]
     i2c_bus: String,
+
+    #[arg(short, long, default_value_t = false, help = "test")]
+    without_multiplexer: bool,
 }
 
 // Prometheus gauges. `lazy_static` ensures they are initialized once.
@@ -83,7 +88,33 @@ fn read_ina260_reg(i2c: &mut LinuxI2CDevice, device_addr: u16, reg: u8) -> Resul
 
     Ok(BigEndian::read_u16(&read_buf))
 }
-
+fn get_device(i2c_bus: &str, tca_address_str: &str, ina260_channel: u8) -> Result<LinuxI2CDevice > {
+    if tca_address_str == "" {
+        info!("Initializing I2C bus: {} for INA260 at address 0x{:02X}", i2c_bus, INA260_ADDRESS);
+        Ok(LinuxI2CDevice::new(&i2c_bus, INA260_ADDRESS)
+            .context(format!("Failed to open I2C bus at {} for INA260", i2c_bus))?)
+    } else {
+        let tca_address_str = if tca_address_str.starts_with("0x") {
+            tca_address_str.trim_start_matches("0x")
+        } else {
+            tca_address_str
+        };
+        let tca_address = u16::from_str_radix(tca_address_str, 16)
+            .context(format!("Invalid TCA address format: {}", tca_address_str))?;
+       
+        if ina260_channel > 7 {
+            anyhow::bail!("Channel number must be between 0 and 7, got {}", ina260_channel);
+        }
+       
+        let mut i2c = LinuxI2CDevice::new(&i2c_bus, tca_address)?;
+        let channel_selection_byte = 1 << ina260_channel;
+        info!("Initializing I2C bus: {} for TCA9548A at address 0x{:02X} and INA260 at address 0x{:02X}", i2c_bus, tca_address, INA260_ADDRESS);
+        i2c.write(&[channel_selection_byte])
+            .context("error")?;
+        i2c.set_slave_address(INA260_ADDRESS)?;
+        Ok(i2c)
+    }
+}
 #[tokio::main] // Enables asynchronous features for the HTTP server
 async fn main() -> Result<()> {
     // Initialize standard logging.
