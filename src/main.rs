@@ -46,6 +46,9 @@ struct Args {
 
     #[arg(short, long, default_value_t = false, help = "Connect directly to INA260 without I2C multiplexer")]
     without_multiplexer: bool,
+
+    #[arg(short, long, default_value_t = String::from("target_device"), help = "Name of the target device monitored by the INA260 sensor for power consumption")]
+    device: String,
 }
 
 // Prometheus gauges. `lazy_static` ensures they are initialized once.
@@ -53,17 +56,17 @@ lazy_static::lazy_static! {
     static ref INA260_CURRENT: GaugeVec =
         GaugeVec::new(
             prometheus::Opts::new("ina260_current", "Current measured by INA260 sensor in Amperes."),
-            &["hostname", "device"]
+            &["hostname", "device", "sensor"]
         ).unwrap();
     static ref INA260_VOLTAGE: GaugeVec =
         GaugeVec::new(
             prometheus::Opts::new("ina260_voltage", "Bus voltage measured by INA260 sensor in Volts."),
-            &["hostname", "device"]
+            &["hostname", "device", "sensor"]
         ).unwrap();
     static ref INA260_POWER: GaugeVec =
         GaugeVec::new(
             prometheus::Opts::new("ina260_power", "Power measured by INA260 sensor in Watts."),
-            &["hostname", "device"]
+            &["hostname", "device", "sensor"]
         ).unwrap();
 }
 
@@ -151,12 +154,13 @@ async fn main() -> Result<()> {
     let ina260_channel = args.channel;
     let mut i2c = get_device(&args.i2c_bus, tca_address_str, ina260_channel)?;
     // Define the device label for Prometheus metrics.
-    let device_label = match tca_address_str {
+    let sensor_label = match tca_address_str {
         "" => format!("ina260_{:02X}", INA260_ADDRESS),
         _ => format!("tca9548a_{}_ch{}_ina260", tca_address_str, ina260_channel)
     };
+    info!("Sensor label: {}", sensor_label);
+    let device_label = &args.device;
     info!("Device label: {}", device_label);
-
     // --- INA260 Communication Verification ---
     // Set the I2C slave address to the INA260.
     info!("Setting slave address for INA260 to 0x{:02X}", INA260_ADDRESS);
@@ -249,11 +253,10 @@ async fn main() -> Result<()> {
         info!("Voltage: {:.3} V, Current: {:.3} A, Power: {:.3} W", voltage, current, power);
 
         // Update Prometheus gauges with the collected data and labels.
-        INA260_CURRENT.with_label_values(&[&hostname, &device_label]).set(current);
-        INA260_VOLTAGE.with_label_values(&[&hostname, &device_label]).set(voltage);
-        INA260_POWER.with_label_values(&[&hostname, &device_label]).set(power);
+        INA260_CURRENT.with_label_values(&[&hostname, &device_label, &sensor_label]).set(current);
+        INA260_VOLTAGE.with_label_values(&[&hostname, &device_label, &sensor_label]).set(voltage);
+        INA260_POWER.with_label_values(&[&hostname, &device_label, &sensor_label]).set(power);
 
         thread::sleep(Duration::from_secs(1)); // Wait for 1 second before the next reading.
     }
 }
-
